@@ -1,0 +1,60 @@
+name: Daily email digest
+on:
+  schedule:
+    - cron: "30 3 * * *"      # 09:00 IST
+  workflow_dispatch:
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Send digest
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          python - <<'PY'
+          import os, re, smtplib, ssl, time
+          from email.mime.text import MIMEText
+          from update_news import fetch_all
+          PRIORITY = [
+              ("🚨", "URGENT", r"extend|extension|due date|last date|deadline"),
+              ("⚠️", "IMPORTANT", r"circular|notification|notifies|amend|penalty|gst council|cbdt|cbic"),
+              ("📌", "FYI", r"icai|exam|clarif|announce"),
+          ]
+          def rank(t):
+              for i, (e, l, p) in enumerate(PRIORITY):
+                  if re.search(p, t, re.I):
+                      return i, e, l
+              return len(PRIORITY), "📰", "OTHER"
+          cutoff = time.time() - 24 * 3600
+          rows = sorted(((*rank(x["t"]), x) for x in fetch_all() if x["ts"] >= cutoff),
+                        key=lambda r: (r[0], -r[3]["ts"]))
+          other = [r for r in rows if r[2] == "OTHER"][:5]
+          rows = [r for r in rows if r[2] != "OTHER"] + other
+          lines, cur = ["📋 CA Daily Digest, " + time.strftime("%d %b %Y")], None
+          for _, e, l, x in rows:
+              if l != cur:
+                  cur = l
+                  lines.append("\n" + e + " " + l)
+              lines.append("• " + x["t"] + "\n  " + x["u"])
+          if not rows:
+              lines.append("\nNo new items in the last day.")
+          lines.append("\nVerify against the official notification before acting.")
+          text = "\n".join(lines)
+          print(text)
+          urgent = any(r[2] == "URGENT" for r in rows)
+          user, pw = os.environ["SMTP_USER"], os.environ["SMTP_PASS"]
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as s:
+              s.login(user, pw)
+              for addr in [a.strip() for a in os.environ["EMAIL_TO"].split(",") if a.strip()]:
+                  m = MIMEText(text, "plain", "utf-8")
+                  m["Subject"] = ("🚨 " if urgent else "") + "CA Daily Digest " + time.strftime("%d %b")
+                  m["From"], m["To"] = user, addr
+                  s.sendmail(user, [addr], m.as_string())
+          print("Sent")
+          PY
